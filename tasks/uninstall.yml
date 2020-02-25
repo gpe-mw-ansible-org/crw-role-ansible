@@ -1,0 +1,42 @@
+---
+
+- name: Delete operator subscription for CodeReady
+  template:
+    src: "files/{{ item }}"
+    dest: "{{ work_dir }}/{{ item }}"
+  loop:
+  - codeready_operatorgroup.yaml
+  - codeready_subscription.yaml
+- k8s:
+    state: absent
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - "{{ work_dir }}/codeready_operatorgroup.yaml"
+  - "{{ work_dir }}/codeready_subscription.yaml"
+
+- name: "Ensure che CRDs do not exist"
+  shell: |
+       oc delete crd {{ item }}
+  loop: "{{ che_crds }}"
+  ignore_errors: true
+
+- name: "Delete project {{ ocp_project }}"
+  k8s:
+    state: absent
+    src: "{{ work_dir }}/project.yml"
+
+- name: "Wait until the following project is terminated {{ ocp_project }}"
+  k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: "{{ ocp_project }}"
+  register: r_project
+  retries: 10
+  delay: 10
+  ignore_errors: yes
+  until: r_project.resources | list | length < 1
+
+

@@ -1,0 +1,209 @@
+---
+- name: Ensure {{work_dir}} exists
+  file:
+    path: "{{work_dir}}"
+    state: directory
+
+- name: Filter ansible variables in all needed CRW related templates
+  template:
+    src: "files/{{ item }}"
+    dest: "{{ work_dir }}/{{ item }}"  
+  loop:
+  - codeready_operatorgroup.yaml
+  - codeready_subscription.yaml
+  - codeready_subscription.yaml
+  - codeready_cr.yaml
+  - project.yml
+  - keycloak_realm.json
+  - stack_imagestream.yaml
+
+- name: "Create project {{ ocp_project }}"
+  k8s:
+    state: present
+    src: "{{ work_dir }}/project.yml"
+
+- include_tasks: test_route.yml
+
+- name: define usernames
+  set_fact:
+    users: "{{ users | default([]) + ['user'+item | string] }}"
+  loop: "{{ range(1,((num_users | int) + 1)) | list }}"
+
+
+
+# #########    Install Code Ready Workspaces Operator       #############
+
+- name: Evaluate whether keycloak already exists
+  uri:
+    url: http://codeready-{{ ocp_project }}.{{ ocp_domain }}/dashboard/
+  register: crw_result
+
+- block:
+  - name: "Deploy CRW operator in {{ ocp_project }}"
+    k8s:
+      state: present
+      merge_type:
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('file', item ) | from_yaml }}"
+    loop:
+    - "{{ work_dir }}/codeready_operatorgroup.yaml"
+    - "{{ work_dir }}/codeready_subscription.yaml"
+  
+  - name: "Wait for CodeReady CRD to be ready"
+    k8s_info:
+      api_version: apiextensions.k8s.io/v1beta1
+      kind: CustomResourceDefinition
+      name: checlusters.org.eclipse.che
+    register: r_codeready_crd
+    retries: 10
+    delay: 10
+    ignore_errors: yes
+    until: r_codeready_crd.resources | list | length == 1
+  
+  - name: "Wait for CRW operator to be ready"
+    shell: "oc get deployment codeready-operator -o template --template={{ json_template }} -n {{ ocp_project }}"
+    vars:
+      json_template: '\{\{.status.readyReplicas\}\}'
+    register: result
+    until: result.stdout == "1"
+    retries: 30
+    delay: 10
+    changed_when: false
+  
+  - name: Create CR for CodeReady
+    k8s:
+      state: present
+      merge_type:
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('file', item ) | from_yaml }}"
+    loop:
+    - "{{ work_dir }}/codeready_cr.yaml"
+  
+  - name: "Wait for CheCluster to be ready in {{ ocp_project }}"
+    uri:
+      url: http://codeready-{{ ocp_project }}.{{ ocp_domain }}/dashboard/
+    register: result
+    until: result.status == 200
+    retries: "20"
+    delay: "20"
+
+  when: crw_result.status != 200
+#####################################################################
+
+###########     Determine keycloak admin userId / password      #####
+- name: Get codeready keycloak deployment
+  k8s_facts:
+    kind: Deployment
+    namespace: "{{ ocp_project }}"
+    name: keycloak
+  register: r_keycloak_deployment
+
+- name: set keycloak admin userId
+  set_fact:
+    codeready_sso_admin_username: "{{ r_keycloak_deployment.resources[0].spec.template.spec.containers[0].env | selectattr('name','equalto','SSO_ADMIN_USERNAME') |map (attribute='value') | list | first }}"
+
+- name: set keycloak admin password
+  set_fact:
+    codeready_sso_admin_password: "{{ r_keycloak_deployment.resources[0].spec.template.spec.containers[0].env | selectattr('name','equalto','SSO_ADMIN_PASSWORD') |map (attribute='value') | list | first }}"
+
+- name: show codeready keycloak admin username
+  debug:
+    msg: "codeready keycloak admin username: {{ codeready_sso_admin_username }}"
+
+- name: show codeready keycloak admin password
+  debug:
+    msg: "codeready keycloak admin password: {{ codeready_sso_admin_password }}"
+##############################################################
+  
+
+#########       Load CRW Realm in keycloak      ##############
+
+- name: Evaluate whether realm already exists in keycloak
+  uri:
+    url: http://keycloak-{{ ocp_project }}.{{ ocp_domain }}/auth/realms/{{ crw_realm_id }}/.well-known/openid-configuration
+  register: realm_result
+  ignore_errors: true
+
+- block:
+  - name: enable script upload
+    command: oc set env -n {{ ocp_project }} deployment/keycloak JAVA_OPTS_APPEND="-Dkeycloak.profile.feature.scripts=enabled -Dkeycloak.profile.feature.upload_scripts=enabled"
+  
+  - name: get keycloak pod
+    k8s_facts:
+      api_version: v1
+      kind: Pod
+      namespace: "{{ ocp_project }}"
+      label_selectors:
+        - app = codeready
+        - component = keycloak
+    register: r_keycloak_pod
+    retries: 120
+    delay: 10
+    until: r_keycloak_pod.resources | list | length == 1
+  - set_fact:
+      pod_name: "{{ r_keycloak_pod.resources[0].metadata.name }}"
+  
+  - name: "Add a new realm to the following keycloak pod using kcadm  {{ pod_name }}"
+    shell: >
+      oc cp {{ work_dir }}/keycloak_realm.json {{ pod_name }}:/tmp/realm.json -n {{ ocp_project }} &&
+      oc exec -n {{ ocp_project }} {{ pod_name }} -c keycloak -- bash -c
+      "/opt/eap/bin/kcadm.sh config credentials --server http://keycloak:8080/auth --realm master --user {{ codeready_sso_admin_username }} --password {{ codeready_sso_admin_password }} &&
+      /opt/eap/bin/kcadm.sh create realms -f /tmp/realm.json &&
+      rm -f /tmp/realm.json"
+    register: cmd_res
+    retries: 10
+    delay: 5
+    until: cmd_res.rc == 0
+  
+  when: realm_result.status != 200
+#####################################################
+
+
+########     Add users to codeready realm       ######
+
+- name: create codeready users
+  include_tasks: add_che_user.yaml
+  vars:
+    user: "{{ item }}" 
+  with_list: "{{ users }}"
+#####################################################
+
+
+
+- name: Import stack imagestream
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - "{{ work_dir }}/stack_imagestream.yaml"
+
+
+- name: wait for stack to be a thing
+  k8s_info:
+    kind: ImageStream
+    name: quarkus-stack
+    namespace: openshift
+  register: r_stack_is
+  retries: 200
+  delay: 10
+  ignore_errors: yes
+  until: r_stack_is.resources | list | length == 1
+
+#- name: import stack image
+#  shell: |
+#    oc import-image --all quarkus-stack -n openshift
+
+# - name: wait a minute and let the image download and be registered so workspaces start up
+#  pause:
+#      minutes: 1
+
+- name: Pre-create and warm user workspaces
+  include_tasks: create_che_workspace.yaml
+  vars:
+    user: "{{ item }}"
+  with_list: "{{ users }}"

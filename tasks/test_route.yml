@@ -1,0 +1,17 @@
+---
+
+- name: create test route
+  shell: |
+       oc create route edge test --service=test --port=80 -n {{ ocp_project }}
+
+- name: get domain url
+  shell: echo $(oc get route test -o jsonpath='{.spec.host}' -n {{ ocp_project }} | sed "s/test-{{ ocp_project }}.//g")
+  register: ocp_domain_host
+
+- name: delete test route
+  shell: |
+       oc delete route test -n {{ ocp_project }}
+
+- name: set ocp_domain fact
+  set_fact: 
+    ocp_domain: "{{ ocp_domain_host.stdout }}"

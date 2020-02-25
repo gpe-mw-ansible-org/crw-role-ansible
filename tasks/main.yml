@@ -1,0 +1,9 @@
+---
+
+- name: Running install tasks
+  import_tasks: ./install.yml
+  when: ACTION == "create"
+
+- name: Running uninstall tasks
+  import_tasks: ./uninstall.yml
+  when: ACTION == "remove"

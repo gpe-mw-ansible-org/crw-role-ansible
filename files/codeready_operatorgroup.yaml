@@ -1,0 +1,12 @@
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  generateName: {{ ocp_project }}
+  annotations:
+    olm.providedAPIs: CheCluster.v1.org.eclipse.che
+  name: {{ ocp_project }}-operator-group
+  namespace: {{ ocp_project }}
+spec:
+  targetNamespaces:
+    - {{ ocp_project }}

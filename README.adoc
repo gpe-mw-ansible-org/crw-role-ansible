@@ -1,0 +1,29 @@
+= Multi-User Code Ready Workspaces (CRW) Provisioning
+
+. Create Playbook:
++
+-----
+$ echo "
+- hosts: all
+  become: false
+  gather_facts: False
+  vars_files:
+  roles:
+    - gpe_mw_ansible.crw-role-ansible
+" > /tmp/crw-role-ansible.yml
+-----
+
+. install:
++
+-----
+$ ansible-playbook -i localhost, -c local /tmp/crw-role-ansible.yml \
+                    -e"ocp_user_needs_quota=true" \
+                    -e"ACTION=create"
+-----
+
+. uninstall:
++
+-----
+$ ansible-playbook -i localhost, -c local /tmp/crw-role-ansible.yml \
+                    -e"ACTION=remove"
+-----

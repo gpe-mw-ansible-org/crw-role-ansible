@@ -1,0 +1,11 @@
+---
+admin_username: crw0
+ocp_project: crw-{{ admin_username }}
+work_dir: "/tmp/{{ ocp_project }}"
+crw_realm_id: crw-realm
+
+che_crds:
+  - checlusters.org.eclipse.che
+
+num_users: 10
+che_user_password: cheuser1!
